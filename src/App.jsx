@@ -8,10 +8,14 @@ import {
 } from "lucide-react";
 
 import { AC_VALUES, AC_FILTER_OPTIONS, normalizeAc, matchesAcFilter } from "./filters.mjs";
-import { ROLES, CATEGORIES, normalizeRole, normalizePersona, roleLabel, personaLabel, describeAccount, audienceForPersona, checkLoginMatch, navIdsForRole } from "./accounts.mjs";
+import { ROLES, CATEGORIES, normalizeRole, normalizePersona, roleLabel, personaLabel, describeAccount, checkLoginMatch, navIdsForRole } from "./accounts.mjs";
 
 const sessionCache = { phone: null };
-const API_BASE = (typeof import.meta !== "undefined" && import.meta.env?.VITE_API_URL) || "http://localhost:3001/api";
+const API_BASE = typeof window !== "undefined" && window.BASERA_API_URL
+  ? window.BASERA_API_URL
+  : typeof window !== "undefined" && !["localhost", "127.0.0.1"].includes(window.location.hostname)
+    ? `${window.location.origin}/api`
+    : "http://localhost:3001/api";
 const api = async (path, options = {}) => {
   const token = (() => { try { return localStorage.getItem("basera:token"); } catch { return null; } })();
   const response = await fetch(`${API_BASE}${path}`, { ...options, headers: { "Content-Type": "application/json", ...(token ? { Authorization: `Bearer ${token}` } : {}), ...options.headers } });
@@ -45,17 +49,16 @@ function maskPhone(phone) {
  * No production OTP is hardcoded: the code is generated fresh per request,
  * lives only in memory (never persisted to localStorage), and expires.
  */
-const OTP_TTL_MS = 5 * 60 * 1000;
 const OTP_RESEND_COOLDOWN_S = 30;
-const OTP_MAX_ATTEMPTS = 5;
-async function sendOtpToPhone(phone) {
-  const data = await api("/auth/otp", { method: "POST", body: JSON.stringify({ phone, mode: window.__baseraAuthMode }) });
+async function sendOtpToPhone(phone, context) {
+  const data = await api("/auth/otp", { method: "POST", body: JSON.stringify({ phone, mode: context.mode, role: context.role, persona: context.persona }) });
   return { code: data.demoCode || null, expiresAt: data.expiresAt };
 }
 async function verifyOtpWithBackend(session, enteredCode) {
   if (!session) return { ok: false, reason: "No OTP was requested for this number." };
   try {
-    const data = await api("/auth/verify", { method: "POST", body: JSON.stringify({ phone: session.phone, code: enteredCode, mode: window.__baseraAuthMode, name: window.__baseraSignupName, role: window.__baseraRole, persona: window.__baseraPersona }) });
+    const { mode, name, role, persona } = session.context;
+    const data = await api("/auth/verify", { method: "POST", body: JSON.stringify({ phone: session.phone, code: enteredCode, mode, name, role, persona }) });
     try { localStorage.setItem("basera:token", data.token); } catch {}
     return { ok: true, account: data.account };
   } catch (error) { return { ok: false, reason: error.message }; }
@@ -771,12 +774,9 @@ function BaseraThemeStyles() {
         .category-pill:hover { transform: translateY(-2px); background: rgba(233, 162, 59, 0.12); box-shadow: 0 0 16px var(--hover-glow), 0 2px 8px -2px rgba(0, 0, 0, 0.15); }
         .category-pill.active-tab { background: rgba(233, 162, 59, 0.18); box-shadow: 0 0 12px var(--hover-glow); border-bottom: 2px solid var(--marigold); }
 
-        /* ---- Cursor-tracked card glow (pinned-notice cards keep their tilt until hovered) ---- */
+        /* ---- Pinned-notice cards keep their tilt until hovered ---- */
         .notice-card { border-radius: 6px; transform: rotate(var(--tilt, 0deg));
           transition: transform 260ms cubic-bezier(0.16, 1, 0.3, 1), box-shadow 260ms cubic-bezier(0.16, 1, 0.3, 1), border-color 220ms ease, background-color 0.2s; }
-        .notice-card::before { content: ""; position: absolute; inset: 0; border-radius: inherit; pointer-events: none; z-index: 10; opacity: 0; transition: opacity 250ms ease;
-          background: radial-gradient(240px circle at var(--mouse-x, -999px) var(--mouse-y, -999px), var(--hover-glow), transparent 75%); }
-        .notice-card:hover::before, .notice-card:focus-visible::before { opacity: 1; }
         .notice-card:hover { transform: rotate(0deg) translateY(-3px) scale(1.008); box-shadow: var(--hover-glow-lg) !important; border-color: var(--hover-card-border) !important; }
         .card-img-zoom { transition: transform 450ms cubic-bezier(0.2, 0.8, 0.2, 1); }
         .notice-card:hover .card-img-zoom { transform: scale(1.05); }
@@ -826,19 +826,6 @@ export default function BaseraApp() {
     document.documentElement.setAttribute("data-theme", darkMode ? "dark" : "light");
   }, [darkMode]);
 
-  // Feeds the cursor position into the hovered card so its ambient glow follows the pointer.
-  useEffect(() => {
-    const onMove = (e) => {
-      const card = e.target?.closest?.(".notice-card");
-      if (!card) return;
-      const r = card.getBoundingClientRect();
-      card.style.setProperty("--mouse-x", `${e.clientX - r.left}px`);
-      card.style.setProperty("--mouse-y", `${e.clientY - r.top}px`);
-    };
-    document.addEventListener("mousemove", onMove, { passive: true });
-    return () => document.removeEventListener("mousemove", onMove);
-  }, []);
-
   const [favorites, setFavorites] = useState(() => baseraDb.loadJson("data:favorites", []));
   useEffect(() => { baseraDb.saveJson("data:favorites", favorites); }, [favorites]);
   function toggleFavorite(id) { setFavorites((f) => (f.includes(id) ? f.filter((x) => x !== id) : [...f, id])); }
@@ -873,13 +860,6 @@ export default function BaseraApp() {
     api("/me").then(({ account: acc }) => { baseraDb.setSessionPhone(acc.phone); setCurrentUser({ phone: acc.phone, name: acc.name, role: normalizeRole(acc.role), persona: normalizePersona(acc.persona) }); setSubscription({ active: acc.subscriptionActive, plan: acc.plan }); }).catch(() => {}).finally(() => setAuthChecked(true));
   }, []); // eslint-disable-line
 
-  async function loadAccount(phone) {
-    try { return (await api("/auth/account", { method: "POST", body: JSON.stringify({ phone }) })).account; } catch { return null; }
-  }
-  async function saveAccount(phone, data) {
-    return data;
-  }
-
   // Step 1: request an OTP for the entered phone number. Rate-limited via resendCooldown;
   // never consumes/creates an account, so it's always safe to call.
   async function handleSendOtp() {
@@ -888,22 +868,13 @@ export default function BaseraApp() {
     const phone = normalizePhone(authForm.phone);
     if (!isValidPhone(authForm.phone)) { setAuthError("Enter a valid phone number."); setAuthBusy(false); return; }
     if (authMode === "signup" && !authForm.name.trim()) { setAuthError("Enter your name."); setAuthBusy(false); return; }
-    // For login, make sure an account exists before bothering to text a code.
-    if (authMode === "login") {
-      const existing = await loadAccount(phone);
-      const match = checkLoginMatch(existing, authRole, authPersona);
-      if (!match.ok) { setAuthError(match.reason); setAuthBusy(false); return; }
-    } else {
-      const existing = await loadAccount(phone);
-      if (existing) { setAuthError("An account with this number already exists — log in instead."); setAuthBusy(false); return; }
-    }
-    window.__baseraAuthMode = authMode; window.__baseraSignupName = authForm.name.trim(); window.__baseraRole = authRole; window.__baseraPersona = authPersona;
+    const context = { mode: authMode, name: authForm.name.trim(), role: authRole, persona: authPersona };
     let otp;
-    try { otp = await sendOtpToPhone(phone); } catch (error) { setAuthError(error.message); setAuthBusy(false); return; }
+    try { otp = await sendOtpToPhone(phone, context); } catch (error) { setAuthError(error.message); setAuthBusy(false); return; }
     const { code, expiresAt } = otp;
-    setOtpSession({ phone, code, expiresAt, attempts: 0 });
+    setOtpSession({ phone, code, expiresAt, context, attempts: 0 });
     setAuthForm((f) => ({ ...f, phone, otp: "" }));
-    setDevOtpHint(code); // demo-only: shown because no real SMS backend is connected (see sendOtpToPhone)
+    setDevOtpHint(code); // Returned only when the server is explicitly running in demo mode.
     setAuthStep("otp");
     setResendCooldown(OTP_RESEND_COOLDOWN_S);
     setAuthBusy(false);
@@ -912,7 +883,6 @@ export default function BaseraApp() {
   // Step 2: verify the code server-side (simulated), then create or log into the account.
   async function handleVerifyOtp() {
     setAuthError(""); setAuthBusy(true);
-    window.__baseraAuthMode = authMode; window.__baseraSignupName = authForm.name.trim(); window.__baseraRole = authRole; window.__baseraPersona = authPersona;
     const result = await verifyOtpWithBackend(otpSession, authForm.otp.trim());
     if (!result.ok) {
       setOtpSession((s) => (s ? { ...s, attempts: s.attempts + 1 } : s));
@@ -921,7 +891,7 @@ export default function BaseraApp() {
       return;
     }
     const phone = otpSession.phone;
-    const existing = result.account || await loadAccount(phone);
+    const existing = result.account;
     if (authMode === "signup") {
       const acc = { name: authForm.name.trim(), phone, phoneVerified: true, role: authRole, persona: authPersona, subscriptionActive: false, plan: null };
       // The API creates the account after verifying the OTP.
@@ -953,8 +923,7 @@ export default function BaseraApp() {
 
   async function refreshSubscriptionFromDb() {
     if (!currentUser?.phone) return;
-    const acc = await loadAccount(currentUser.phone);
-    if (acc) setSubscription({ active: !!acc.subscriptionActive, plan: acc.plan || null });
+    try { const { account } = await api("/me"); setSubscription({ active: !!account.subscriptionActive, plan: account.plan || null }); } catch {}
   }
 
   function requestNearby() {
@@ -1010,12 +979,10 @@ export default function BaseraApp() {
 
   const [listStep, setListStep] = useState("form");
   const [newListing, setNewListing] = useState({
-    title: "", area: "Kamla Nagar", rent: 9000, type: "2-sharing", gender: "Any", tenantFor: "any", food: false, wifi: false, notes: "", location: null,
+    title: "", area: "Kamla Nagar", rent: 9000, type: "2-sharing", gender: "Any", tenantFor: ["students", "professionals"], food: false, wifi: false, notes: "", location: null,
     ac: "", bhk: "Not specified", dimensionValue: "", dimensionType: "Carpet Area", photos: [],
   });
   const [photoUploadError, setPhotoUploadError] = useState("");
-  // An owner's category sets the default "preferred tenants" on new listings.
-  useEffect(() => { if (isOwner) setNewListing((l) => ({ ...l, tenantFor: audienceForPersona(persona) })); }, [isOwner, persona]);
 
   function handleListingPhotoUpload(files) {
     setPhotoUploadError("");
@@ -1102,9 +1069,9 @@ export default function BaseraApp() {
     return properties
       .filter((p) => {
         if (p.city !== selectedCity) return false;
-        const audience = p.tenantFor || "any";
-        if (persona === "student" && audience === "professionals") return false;
-        if (persona === "professional" && audience === "students") return false;
+        const audiences = Array.isArray(p.tenantFor) ? p.tenantFor : p.tenantFor === "any" ? ["students", "professionals"] : [p.tenantFor || "any"];
+        const requestedAudience = persona === "student" ? "students" : "professionals";
+        if (!audiences.includes("any") && !audiences.includes(requestedAudience)) return false;
         if (filters.area !== "All" && p.area !== filters.area) return false;
         if (filters.type !== "All" && p.type !== filters.type) return false;
         if (filters.gender !== "Any" && p.gender !== "Any" && p.gender !== filters.gender) return false;
@@ -1169,7 +1136,7 @@ export default function BaseraApp() {
     const id = listing.id;
     setProperties((prev) => [listing, ...prev]);
     setMyListingIds((prev) => [id, ...prev]);
-    setNewListing({ title: "", area: cityAreas[0] || "Kamla Nagar", rent: 9000, type: "2-sharing", gender: "Any", tenantFor: audienceForPersona(persona), food: false, wifi: false, notes: "", location: null, ac: "", bhk: "Not specified", dimensionValue: "", dimensionType: "Carpet Area", photos: [] });
+    setNewListing({ title: "", area: cityAreas[0] || "Kamla Nagar", rent: 9000, type: "2-sharing", gender: "Any", tenantFor: ["students", "professionals"], food: false, wifi: false, notes: "", location: null, ac: "", bhk: "Not specified", dimensionValue: "", dimensionType: "Carpet Area", photos: [] });
     setListStep("done");
   }
 
@@ -1422,7 +1389,7 @@ export default function BaseraApp() {
                       {normalizeAc(p.ac) && <span className="text-[10px] font-mono font-bold uppercase mr-2 px-1.5 py-0.5" style={{ background: "var(--kraft)", color: "var(--ink)" }}>{normalizeAc(p.ac)}</span>}
                       {(p.bhk && p.bhk !== "Not specified") && <span className="text-[11px] font-mono font-bold mr-2" style={{ color: "var(--sage)" }}>{p.bhk}</span>}
                       {formatAreaSqft(p.dimensionValue) && <span className="text-[11px] font-mono" style={{ color: "color-mix(in srgb, var(--ink) 55%, transparent)" }}>{formatAreaSqft(p.dimensionValue)}</span>}
-                      {(p.tenantFor && p.tenantFor !== "any") && <span className="text-[10px] font-mono uppercase mt-1 inline-block" style={{ color: "color-mix(in srgb, var(--ink) 45%, transparent)" }}>For {p.tenantFor}</span>}
+                      {(p.tenantFor && p.tenantFor !== "any") && <span className="text-[10px] font-mono uppercase mt-1 inline-block" style={{ color: "color-mix(in srgb, var(--ink) 45%, transparent)" }}>For {(Array.isArray(p.tenantFor) ? p.tenantFor : [p.tenantFor]).map((audience) => audience === "professionals" ? "Working professionals" : audience === "students" ? "Students" : audience).join(" + ")}</span>}
                       <div className="flex items-center justify-between mt-3">
                         <span className="font-mono text-lg font-bold" style={{ color: "var(--ink)" }}>₹{p.rent.toLocaleString("en-IN")}<span className="text-xs font-normal" style={{ color: "color-mix(in srgb, var(--ink) 50%, transparent)" }}>/mo</span></span>
                         {rating ? <span className="flex items-center gap-1 text-xs"><Star size={12} fill="var(--marigold)" style={{ color: "var(--marigold)" }} /> {rating} <span style={{ color: "color-mix(in srgb, var(--ink) 40%, transparent)" }}>({p.reviews.length})</span></span> : <span className="text-xs" style={{ color: "color-mix(in srgb, var(--ink) 40%, transparent)" }}>No reviews</span>}
@@ -1672,14 +1639,15 @@ export default function BaseraApp() {
               <div className="space-y-3 p-5" style={{ background: "var(--paper)", border: "1px solid color-mix(in srgb, var(--ink) 12%, transparent)" }}>
                 <input placeholder="Listing title (e.g. Cozy 2-sharing near campus)" value={newListing.title} onChange={(e) => setNewListing((l) => ({ ...l, title: e.target.value }))} className={field} style={fieldStyle} />
                 <div>
-                  <p className="text-xs font-mono uppercase tracking-wide mb-2" style={{ color: "color-mix(in srgb, var(--ink) 50%, transparent)" }}>Preferred tenants</p>
+                  <p className="text-xs font-mono uppercase tracking-wide mb-2" style={{ color: "color-mix(in srgb, var(--ink) 50%, transparent)" }}>Who can apply? Select either or both</p>
                   <div className="flex flex-wrap gap-3 text-sm">
-                    {[{ id: "students", label: "Students" }, { id: "professionals", label: "Working professionals" }, { id: "any", label: "Any" }].map(({ id, label }) => (
-                      <label key={id} className="flex items-center gap-1.5 px-2 py-1" style={{ background: newListing.tenantFor === id ? "color-mix(in srgb, var(--marigold) 18%, transparent)" : "var(--kraft)" }}>
-                        <input type="radio" name="tenantFor" checked={newListing.tenantFor === id} onChange={() => setNewListing((l) => ({ ...l, tenantFor: id }))} /> {label}
+                    {[{ id: "students", label: "Students" }, { id: "professionals", label: "Working professionals" }].map(({ id, label }) => (
+                      <label key={id} className="flex items-center gap-1.5 px-2 py-1" style={{ background: (Array.isArray(newListing.tenantFor) ? newListing.tenantFor.includes(id) : newListing.tenantFor === "any" || newListing.tenantFor === id) ? "color-mix(in srgb, var(--marigold) 18%, transparent)" : "var(--kraft)" }}>
+                        <input type="checkbox" checked={Array.isArray(newListing.tenantFor) ? newListing.tenantFor.includes(id) : newListing.tenantFor === "any" || newListing.tenantFor === id} onChange={(e) => setNewListing((l) => { const current = Array.isArray(l.tenantFor) ? l.tenantFor : l.tenantFor === "any" ? ["students", "professionals"] : [l.tenantFor]; return { ...l, tenantFor: e.target.checked ? [...new Set([...current, id])] : current.filter((audience) => audience !== id) }; })} /> {label}
                       </label>
                     ))}
                   </div>
+                  {newListing.tenantFor.length === 0 && <p className="text-xs mt-1" style={{ color: "var(--stamp)" }}>Choose at least one renter category.</p>}
                 </div>
                 <GoogleLocationPicker value={newListing.location} onChange={(loc) => setNewListing((l) => ({ ...l, location: loc }))} />
                 <div className="grid grid-cols-2 gap-3">
@@ -1726,7 +1694,7 @@ export default function BaseraApp() {
                   )}
                 </div>
 
-                <button disabled={!newListing.title} onClick={() => { if (newListing.location) setChecklist((c) => ({ ...c, address: true })); if (newListing.photos.length) setChecklist((c) => ({ ...c, photos: true })); setListStep("verify"); }} className="w-full py-2.5 text-sm font-bold uppercase tracking-wide disabled:opacity-40" style={{ background: "var(--marigold)", color: "var(--ink)" }}>Continue to verification</button>
+                <button disabled={!newListing.title || !newListing.tenantFor.length} onClick={() => { if (newListing.location) setChecklist((c) => ({ ...c, address: true })); if (newListing.photos.length) setChecklist((c) => ({ ...c, photos: true })); setListStep("verify"); }} className="w-full py-2.5 text-sm font-bold uppercase tracking-wide disabled:opacity-40" style={{ background: "var(--marigold)", color: "var(--ink)" }}>Continue to verification</button>
               </div>
             </>
           )}
@@ -1747,7 +1715,7 @@ export default function BaseraApp() {
               <Stamp color="var(--sage)" rotate={-8} style={{ fontSize: 13, padding: "6px 14px", borderWidth: 2 }}><CheckCircle2 size={16} /> Submitted</Stamp>
               <p className="mt-4" style={{ ...HEAD, fontSize: 24 }}>Listing submitted</p>
               <p className="text-sm mt-1 mb-6" style={{ color: "color-mix(in srgb, var(--ink) 60%, transparent)" }}>It's live under "Not verified" in {selectedCity} until review is complete.</p>
-              <button onClick={() => { setListStep("form"); setNewListing({ title: "", area: cityAreas[0] || "Kamla Nagar", rent: 9000, type: "2-sharing", gender: "Any", tenantFor: audienceForPersona(persona), food: false, wifi: false, notes: "", location: null, ac: "", bhk: "Not specified", dimensionValue: "", dimensionType: "Carpet Area", photos: [] }); setChecklist({ id: false, ownership: false, photos: false, address: false }); }} className="px-4 py-2 text-sm font-bold uppercase" style={{ background: "var(--marigold)", color: "var(--ink)" }}>List another property</button>
+              <button onClick={() => { setListStep("form"); setNewListing({ title: "", area: cityAreas[0] || "Kamla Nagar", rent: 9000, type: "2-sharing", gender: "Any", tenantFor: ["students", "professionals"], food: false, wifi: false, notes: "", location: null, ac: "", bhk: "Not specified", dimensionValue: "", dimensionType: "Carpet Area", photos: [] }); setChecklist({ id: false, ownership: false, photos: false, address: false }); }} className="px-4 py-2 text-sm font-bold uppercase" style={{ background: "var(--marigold)", color: "var(--ink)" }}>List another property</button>
             </div>
           )}
           {myListings.length > 0 && (

@@ -8,15 +8,33 @@ listings and community posts use the API.
 
 Use Node.js 18 or newer. In one terminal run `npm run backend:demo` to start
 the API on `http://localhost:3001`; in another serve the project with your
-usual static development server. Demo mode returns an OTP in the UI and is for
-local development only. For a non-demo process use `npm run backend`; OTPs
-are generated and verified server-side, but delivery must be connected to an
-SMS provider before real users can sign in. Set `PORT` to change the API port
+usual static development server. Demo mode returns a test OTP in the UI and is
+for local development only. For real phone verification, add
+`TWILIO_ACCOUNT_SID`, `TWILIO_AUTH_TOKEN`, and `TWILIO_VERIFY_SERVICE_SID` to
+the backend host's environment, set a strong `SESSION_SECRET`, and keep
+`OTP_DEV_MODE=false`. The server calls Twilio Verify to send and check codes;
+it does not generate or expose production OTPs. The app expires challenges
+after five minutes, binds each challenge to the selected login type, and
+limits verification attempts and resend frequency. Twilio Verify provides the
+SMS verification service; configure its own rate limits in Twilio as well.
+Set `PORT` to change the API port
 and `BASERA_DB_FILE` to move its JSON data file. The default data file is
 `backend/data.json` (created on first write).
 
-The frontend uses `http://localhost:3001/api` by default. Set
-`VITE_API_URL` to the deployed API base URL when building for another host.
+Each property now stores its own renter audience. Owners can select Students,
+Working professionals, or both on every listing, regardless of the category
+they chose for their owner account.
+
+The frontend uses `http://localhost:3001/api` locally. On a deployed domain it
+uses that domain's `/api` path by default; if the API is hosted separately, set
+`window.BASERA_API_URL` before `bundle.js` loads.
+The Vercel configuration currently deploys the static `dist` frontend only.
+`backend/server.mjs` is a long-running Node server and stores app records in a
+local JSON file, so it is not a production Vercel Functions backend. Before
+enabling live accounts on Vercel, move the API routes into Vercel Functions
+and replace the JSON file with persistent storage (for example, Neon Postgres
+or Upstash Redis); add the Twilio and session secrets to Vercel Environment
+Variables. Never use demo mode in a public deployment.
 The existing demo payment modal does not process real payments; connect a
 payment provider and verify its server-side webhook before treating a plan as
 paid. For production, use a managed database, HTTPS, restricted CORS, provider
@@ -60,7 +78,7 @@ Role and category are saved on the account (`persona` field; older accounts with
 
 Design system taken from the new interaction spec and applied across the whole app:
 
-- **Cursor-tracked card glow.** Every pinned-notice card (listings, plans, movers, partners, matches...) gets an ambient marigold glow that follows the mouse, lifts 3px, straightens its tilt and shows a marigold border on hover. Keyboard focus shows the same glow.
+- **Card hover styling.** Pinned-notice cards lift slightly, straighten their tilt and show a marigold border on hover. No cursor-following gradient is used.
 - **Listing cards redesigned**: 176px cover photo with smooth zoom on hover, gradient overlay, AC / BHK badge on the photo, "Featured" stamp, heart button, review count and a "View details" call-to-action. Sample listings get cover photos; owner-uploaded photos always take priority; a house icon shows if an image can't load.
 - **Saved listings.** Heart button on each card (persisted per browser) and a "Saved (n)" filter.
 - **Search bar** for locality / landmark / listing name, inside a new rounded filter panel with a "Curated listings" header and live count.
