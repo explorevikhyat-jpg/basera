@@ -28,13 +28,14 @@ they chose for their owner account.
 The frontend uses `http://localhost:3001/api` locally. On a deployed domain it
 uses that domain's `/api` path by default; if the API is hosted separately, set
 `window.BASERA_API_URL` before `bundle.js` loads.
-The Vercel configuration currently deploys the static `dist` frontend only.
-`backend/server.mjs` is a long-running Node server and stores app records in a
-local JSON file, so it is not a production Vercel Functions backend. Before
-enabling live accounts on Vercel, move the API routes into Vercel Functions
-and replace the JSON file with persistent storage (for example, Neon Postgres
-or Upstash Redis); add the Twilio and session secrets to Vercel Environment
-Variables. Never use demo mode in a public deployment.
+Vercel serves the frontend from `dist` and routes `/api/*` to
+`api/[...path].mjs`. In the Vercel dashboard, install a Neon Postgres
+integration and add `DATABASE_URL`, `SESSION_SECRET`,
+`TWILIO_ACCOUNT_SID`, `TWILIO_AUTH_TOKEN`, and `TWILIO_VERIFY_SERVICE_SID` to
+the project's Environment Variables, then redeploy. The API creates its tables
+on first request. Never enable local demo mode in a public deployment. The
+standalone `backend/server.mjs` remains available for local Node hosting and
+uses its JSON file store.
 The existing demo payment modal does not process real payments; connect a
 payment provider and verify its server-side webhook before treating a plan as
 paid. For production, use a managed database, HTTPS, restricted CORS, provider

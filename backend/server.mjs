@@ -20,7 +20,7 @@ function persist() { writes = writes.then(async () => { await mkdir(dirname(DB_F
 function json(res, status, body) { res.writeHead(status, { 'content-type': 'application/json; charset=utf-8', 'access-control-allow-origin': '*', 'access-control-allow-headers': 'content-type, authorization', 'access-control-allow-methods': 'GET, POST, PATCH, DELETE, OPTIONS' }); res.end(JSON.stringify(body)); }
 async function body(req) { let text = ''; for await (const chunk of req) { text += chunk; if (text.length > 2_000_000) throw Object.assign(new Error('Request too large'), { status: 413 }); } return text ? JSON.parse(text) : {}; }
 function signSession(phone) {
-  const payload = Buffer.from(JSON.stringify({ phone, exp: Date.now() + SESSION_TTL })).toString('base64url');
+  const payload = Buffer.from(JSON.stringify({ purpose: 'session', phone, exp: Date.now() + SESSION_TTL })).toString('base64url');
   const signature = createHmac('sha256', SESSION_SECRET).update(payload).digest('base64url');
   return `${payload}.${signature}`;
 }
@@ -31,7 +31,7 @@ function auth(req) {
   let received;
   try { received = Buffer.from(signature, 'base64url'); } catch { return null; }
   if (received.length !== expected.length || !timingSafeEqual(received, expected)) return null;
-  try { const session = JSON.parse(Buffer.from(payload, 'base64url').toString()); return session.exp > Date.now() ? db.accounts[session.phone] || null : null; } catch { return null; }
+  try { const session = JSON.parse(Buffer.from(payload, 'base64url').toString()); return session.purpose === 'session' && session.exp > Date.now() ? db.accounts[session.phone] || null : null; } catch { return null; }
 }
 function phoneValid(phone) { return /^\+\d{10,15}$/.test(String(phone || '')); }
 function safeAccount(a) { const { phone, name, role, persona, subscriptionActive, plan } = a; return { phone, name, role, persona, subscriptionActive, plan }; }

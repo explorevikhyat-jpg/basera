@@ -52,13 +52,13 @@ function maskPhone(phone) {
 const OTP_RESEND_COOLDOWN_S = 30;
 async function sendOtpToPhone(phone, context) {
   const data = await api("/auth/otp", { method: "POST", body: JSON.stringify({ phone, mode: context.mode, role: context.role, persona: context.persona }) });
-  return { code: data.demoCode || null, expiresAt: data.expiresAt };
+  return { code: data.demoCode || null, challenge: data.challenge || null, expiresAt: data.expiresAt };
 }
 async function verifyOtpWithBackend(session, enteredCode) {
   if (!session) return { ok: false, reason: "No OTP was requested for this number." };
   try {
     const { mode, name, role, persona } = session.context;
-    const data = await api("/auth/verify", { method: "POST", body: JSON.stringify({ phone: session.phone, code: enteredCode, mode, name, role, persona }) });
+    const data = await api("/auth/verify", { method: "POST", body: JSON.stringify({ phone: session.phone, code: enteredCode, challenge: session.challenge, mode, name, role, persona }) });
     try { localStorage.setItem("basera:token", data.token); } catch {}
     return { ok: true, account: data.account };
   } catch (error) { return { ok: false, reason: error.message }; }
@@ -86,6 +86,12 @@ const baseraDb = {
   },
   saveJson(k, v) {
     this.set(k, JSON.stringify(v));
+  },
+  getAccounts() { return this.loadJson("data:accounts", {}); },
+  saveAccount(account) {
+    const accounts = this.getAccounts();
+    accounts[account.phone] = account;
+    this.saveJson("data:accounts", accounts);
   },
   getSessionPhone() {
     if (sessionCache.phone) return sessionCache.phone;
@@ -638,7 +644,7 @@ function AuthPortal({
 
             <p className="text-[11px] font-mono uppercase tracking-wide mt-5 mb-1" style={{ color: "color-mix(in srgb, var(--ink) 55%, transparent)" }}>3 &middot; Your number</p>
             <p className="text-xs mb-2" style={{ color: "color-mix(in srgb, var(--ink) 60%, transparent)" }}>
-              {isLogin ? "Log in with the same account type and category you signed up with." : "We sign you in with your phone number — no email or password needed."}
+              {isLogin ? "Demo access: enter a valid mobile number and your account type." : "Create a demo profile on this device with a valid mobile number."}
             </p>
             <div className="space-y-3">
               {!isLogin && (
@@ -646,7 +652,7 @@ function AuthPortal({
               )}
               <input type="tel" inputMode="tel" autoComplete="tel" placeholder="Phone number (e.g. 98765 43210)" value={authForm.phone} onChange={(e) => setAuthForm((f) => ({ ...f, phone: e.target.value }))} className="w-full text-sm px-3 py-2 font-mono" style={{ border: "1px dashed color-mix(in srgb, var(--ink) 30%, transparent)", background: "var(--kraft)" }} />
               {authError && <p role="alert" className="text-sm" style={{ color: "var(--stamp)" }}>{authError}</p>}
-              <button type="button" disabled={authBusy} onClick={onSendOtp} className="w-full py-2.5 text-sm font-bold uppercase tracking-wide disabled:opacity-50 flex items-center justify-center gap-2" style={{ background: "var(--marigold)", color: "#1E2A38" }}>{authBusy ? <Loader2 size={16} className="spin" /> : <LogIn size={16} />} Send OTP &middot; {roleLabel(authRole)} / {personaLabel(authPersona)}</button>
+              <button type="button" disabled={authBusy} onClick={onSendOtp} className="w-full py-2.5 text-sm font-bold uppercase tracking-wide disabled:opacity-50 flex items-center justify-center gap-2" style={{ background: "var(--marigold)", color: "#1E2A38" }}>{authBusy ? <Loader2 size={16} className="spin" /> : <LogIn size={16} />} Continue as {roleLabel(authRole)} / {personaLabel(authPersona)}</button>
             </div>
           </>
         )}
@@ -857,26 +863,35 @@ export default function BaseraApp() {
   }, [resendCooldown]);
 
   useEffect(() => {
-    api("/me").then(({ account: acc }) => { baseraDb.setSessionPhone(acc.phone); setCurrentUser({ phone: acc.phone, name: acc.name, role: normalizeRole(acc.role), persona: normalizePersona(acc.persona) }); setSubscription({ active: acc.subscriptionActive, plan: acc.plan }); }).catch(() => {}).finally(() => setAuthChecked(true));
-  }, []); // eslint-disable-line
+    const phone = baseraDb.getSessionPhone();
+    const account = phone ? baseraDb.getAccounts()[phone] : null;
+    if (account) {
+      setCurrentUser({ phone: account.phone, name: account.name, role: normalizeRole(account.role), persona: normalizePersona(account.persona) });
+      setSubscription({ active: !!account.subscriptionActive, plan: account.plan || null });
+    }
+    setAuthChecked(true);
+  }, []);
 
-  // Step 1: request an OTP for the entered phone number. Rate-limited via resendCooldown;
-  // never consumes/creates an account, so it's always safe to call.
+  // Demo authorization is local: validate the mobile number and save a profile in this browser.
   async function handleSendOtp() {
     setAuthError(""); setAuthBusy(true);
-    if (resendCooldown > 0) { setAuthBusy(false); return; }
     const phone = normalizePhone(authForm.phone);
     if (!isValidPhone(authForm.phone)) { setAuthError("Enter a valid phone number."); setAuthBusy(false); return; }
     if (authMode === "signup" && !authForm.name.trim()) { setAuthError("Enter your name."); setAuthBusy(false); return; }
-    const context = { mode: authMode, name: authForm.name.trim(), role: authRole, persona: authPersona };
-    let otp;
-    try { otp = await sendOtpToPhone(phone, context); } catch (error) { setAuthError(error.message); setAuthBusy(false); return; }
-    const { code, expiresAt } = otp;
-    setOtpSession({ phone, code, expiresAt, context, attempts: 0 });
-    setAuthForm((f) => ({ ...f, phone, otp: "" }));
-    setDevOtpHint(code); // Returned only when the server is explicitly running in demo mode.
-    setAuthStep("otp");
-    setResendCooldown(OTP_RESEND_COOLDOWN_S);
+    const existing = baseraDb.getAccounts()[phone];
+    if (authMode === "login" && existing) {
+      const match = checkLoginMatch(existing, authRole, authPersona);
+      if (!match.ok) { setAuthError(match.reason); setAuthBusy(false); return; }
+    }
+    const account = authMode === "login" && existing ? existing : {
+      phone, name: authForm.name.trim() || "Demo user", role: authRole, persona: authPersona,
+      subscriptionActive: false, plan: null,
+    };
+    baseraDb.saveAccount(account);
+    baseraDb.setSessionPhone(phone);
+    try { localStorage.removeItem("basera:token"); } catch {}
+    setCurrentUser({ phone, name: account.name, role: normalizeRole(account.role), persona: normalizePersona(account.persona) });
+    setSubscription({ active: !!account.subscriptionActive, plan: account.plan || null });
     setAuthBusy(false);
   }
 
@@ -937,7 +952,6 @@ export default function BaseraApp() {
   }
 
   function logout() {
-    api("/auth/logout", { method: "POST" }).catch(() => {});
     try { localStorage.removeItem("basera:token"); } catch {}
     baseraDb.setSessionPhone(null);
     setCurrentUser(null);
